@@ -114,13 +114,14 @@ a.btn{text-decoration:none;display:inline-block;color:var(--ink)}
 @media (min-width:940px){.reader{grid-template-columns:1.25fr 1fr;align-items:start}.reader .side{position:sticky;top:5.5rem;max-height:calc(100vh - 7rem);overflow:auto}}
 .verse{padding:1.2rem 1.2rem 1.4rem;direction:rtl;display:flex;flex-wrap:wrap;gap:1.1rem .7rem;align-items:flex-start}
 .w{border:0;background:transparent;border-radius:8px;padding:.15rem .35rem .45rem;display:flex;flex-direction:column;align-items:center;gap:.3rem;font-family:var(--qr);font-size:2rem;line-height:1}
-.w .t{display:block;line-height:2.35;padding:0 .05em .15em;border-bottom:2px solid transparent}
+.w{min-width:0;max-width:100%}
+.w .t{display:block;line-height:2.5;padding:0 .05em .15em;border-bottom:2px solid transparent}
 .w:hover{background:var(--surface-2)}
 .w.unk .t{border-bottom:2px dotted var(--lapis)}
 .w.lrn .t{border-bottom:2px solid var(--saffron)}
 .w.sel{background:var(--saffron-soft)}
-.w .ph{display:block;font-family:var(--serif);font-style:italic;direction:ltr;font-size:.8rem;line-height:1.3;color:var(--saffron);max-width:9rem;text-align:center;padding-top:.15rem}
-.w .g{display:block;font-family:var(--sans);direction:ltr;font-size:.74rem;line-height:1.3;color:var(--muted);max-width:9rem;text-align:center}
+.w .ph{overflow-wrap:anywhere;display:block;font-family:var(--serif);font-style:italic;direction:ltr;font-size:.8rem;line-height:1.3;color:var(--saffron);max-width:10rem;text-align:center;padding-top:.15rem}
+.w .g{overflow-wrap:anywhere;display:block;font-family:var(--sans);direction:ltr;font-size:.74rem;line-height:1.3;color:var(--muted);max-width:9rem;text-align:center}
 .vmark{font-family:var(--qr);font-size:1.8rem;color:var(--saffron);align-self:center}
 .legend{display:flex;gap:1rem;flex-wrap:wrap;color:var(--muted);font-size:.85rem;margin-top:.6rem}
 .legend i{display:inline-block;width:1.4rem;border-bottom:2px dotted var(--lapis);margin-right:.35rem;vertical-align:middle}
@@ -506,6 +507,11 @@ nav .ic,nav .sh{display:none}
 <div class="lem set">
   <h2>Réglages</h2>
   <section style="border-top:0;margin-top:.4rem;padding-top:0">
+    <h4>Version de l’app</h4>
+    <p>Version <strong id="app-ver"></strong>. Si une mise à jour ne s’affiche pas, touchez le bouton ci-dessous : l’app recharge la dernière version depuis internet.</p>
+    <div class="row"><button class="btn" id="force-update">Forcer la mise à jour</button></div>
+  </section>
+  <section>
     <h4>Son et prise vocale</h4>
     <p id="set-mic"></p>
     <div class="row"><button class="btn" id="test-sound">Tester le son</button><span id="test-mic-slot"></span></div>
@@ -2049,6 +2055,14 @@ $("#b-set").addEventListener("click", () => {
   $("#dlg-set").showModal();
 });
 $("#set-close").addEventListener("click", () => $("#dlg-set").close());
+const APP_VERSION = "20";
+$("#app-ver").textContent = APP_VERSION;
+$("#force-update").addEventListener("click", async e => {
+  e.currentTarget.disabled = true; e.currentTarget.textContent = "Mise à jour…";
+  try { const regs = await navigator.serviceWorker?.getRegistrations?.() || []; await Promise.all(regs.map(r => r.unregister())); } catch {}
+  try { const ks = await caches?.keys?.() || []; await Promise.all(ks.map(k => caches.delete(k))); } catch {}
+  location.reload();
+});
 $("#test-sound").addEventListener("click", e => {
   show($("#test-st"), "Chargement du son… vous devriez entendre « bismi ».");
   play(wordAudio(1, 1, 1), e.currentTarget, st => {
@@ -2204,6 +2218,12 @@ initSpeech();
 if (firstLaunch) setTimeout(() => openProfiles(true), 400);
 })();
 </script>
-<script>if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));</script>
+<script>
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) addEventListener("load", () => {
+  navigator.serviceWorker.register("sw.js", {updateViaCache: "none"}).then(r => r.update()).catch(() => {});
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (!reloaded && navigator.serviceWorker.controller) { reloaded = true; location.reload(); } });
+});
+</script>
 </body>
 </html>
