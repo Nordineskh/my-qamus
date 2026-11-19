@@ -246,6 +246,9 @@ dialog::backdrop{background:rgba(10,15,20,.5)}
 .live{font-family:var(--ar);direction:rtl;font-size:1.3rem;color:var(--muted);min-height:1.5em;margin-top:.4rem}
 .field{width:100%;border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem;background:var(--bg);margin-top:.4rem}
 .set p{font-family:var(--serif);margin:.3rem 0}
+#toast{position:fixed;left:50%;bottom:calc(1.2rem + env(safe-area-inset-bottom,0px));transform:translate(-50%,1rem);background:var(--ink);color:var(--bg);padding:.6rem 1rem;border-radius:10px;font-size:.92rem;max-width:min(92vw,28rem);text-align:center;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:50}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+@media (max-width:760px){#toast{bottom:calc(5.4rem + env(safe-area-inset-bottom,0px))}}
 .wbw-note{margin:.5rem 0 0;font-size:.8rem;color:var(--muted)}
 .whead{border-bottom:1px solid var(--line);margin-bottom:.8rem}
 .wbig{font-family:var(--qr);font-size:3rem;line-height:1.6;direction:rtl;text-align:right}
@@ -501,6 +504,14 @@ nav .ic,nav .sh{display:none}
 <dialog id="dlg-set"><div class="dlg-bar"><button class="btn ghost" id="set-close">Fermer</button></div>
 <div class="lem set">
   <h2>Réglages</h2>
+  <section style="border-top:0;margin-top:.4rem;padding-top:0">
+    <h4>Son et prise vocale</h4>
+    <p id="set-mic"></p>
+    <div class="row"><button class="btn" id="test-sound">Tester le son</button><span id="test-mic-slot"></span></div>
+    <div class="status" id="test-st" hidden></div>
+    <div class="live" id="test-live"></div>
+    <p id="set-tips" class="tip"></p>
+  </section>
   <section id="set-ai">
     <h4>Claude : traductions, explications et dictionnaire</h4>
     <p id="set-ai-txt">Collez votre clé API Anthropic (créée sur console.anthropic.com). Elle reste enregistrée uniquement dans ce navigateur, jamais dans le code de la page : vous pouvez héberger l’app publiquement sans l’exposer.</p>
@@ -516,10 +527,6 @@ nav .ic,nav .sh{display:none}
     <p>Exportez vos cartes, mots acquis et traductions dans un fichier, pour les garder en sécurité ou les reprendre sur un autre appareil.</p>
     <div class="row"><button class="btn" id="set-exp">Exporter ma progression</button><label class="btn">Importer une sauvegarde<input type="file" id="set-imp" accept="application/json,.json" hidden></label></div>
     <div class="status" id="set-st2" hidden></div>
-  </section>
-  <section>
-    <h4>Prise vocale</h4>
-    <p id="set-mic"></p>
   </section>
   <section>
     <h4>Sources</h4>
@@ -1210,19 +1217,57 @@ Réponds uniquement en JSON : {"tableaux": [{"titre": "Accompli", "lignes": [{"l
 
 /* =================== VOIX : écoute, reconnaissance, jugement =================== */
 const WebSR = window.SpeechRecognition || window.webkitSpeechRecognition;
-let dict = null, activeListen = null;
+let dict = null, activeListen = null, lastMicErr = "";
 const audioOK = !inViewer; // les pages publiées sur claude.ai ne peuvent pas charger d’audio externe
 const pad3 = n => String(n).padStart(3, "0");
-const verseAudio = (s, v) => `https://everyayah.com/data/Alafasy_128kbps/${pad3(s)}${pad3(v)}.mp3`;
-const wordAudio = (s, v, w) => `https://audio.qurancdn.com/wbw/${pad3(s)}_${pad3(v)}_${pad3(w)}.mp3`;
-let player = null;
-function play(url, btn) {
-  if (!player) player = new Audio();
-  player.pause(); player.src = url;
-  player.onerror = () => { if (btn) { btn.textContent = "Audio indisponible"; btn.disabled = true; } };
-  player.play().catch(() => {});
+const verseAudio = (s, v) => [
+  `https://everyayah.com/data/Alafasy_128kbps/${pad3(s)}${pad3(v)}.mp3`,
+  `https://verses.quran.com/Alafasy/mp3/${pad3(s)}${pad3(v)}.mp3`,
+  `https://everyayah.com/data/Alafasy_64kbps/${pad3(s)}${pad3(v)}.mp3`];
+const wordAudio = (s, v, w) => [
+  `https://audio.qurancdn.com/wbw/${pad3(s)}_${pad3(v)}_${pad3(w)}.mp3`,
+  `https://verses.quran.com/wbw/${pad3(s)}_${pad3(v)}_${pad3(w)}.mp3`];
+let player = null, lastAudioErr = "";
+function toast(msg, ms = 3500) {
+  let t = document.getElementById("toast");
+  if (!t) { t = el("div", {id: "toast", role: "status"}); document.body.append(t); }
+  t.textContent = msg; t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), ms);
+}
+function play(urls, btn, onState) {
+  // le micro garde parfois le son en mode « appel » (très faible) : on le libère avant de jouer
+  if (activeListen) { activeListen.stop(); activeListen = null; }
+  urls = Array.isArray(urls) ? urls : [urls];
+  if (player) { try { player.pause(); } catch {} }
+  const label = btn ? (btn.dataset.label || btn.textContent) : "";
+  if (btn) btn.dataset.label = label;
+  let i = 0;
+  const reset = () => { if (btn) btn.textContent = label; };
+  const tryNext = () => {
+    if (i >= urls.length) {
+      reset(); lastAudioErr = lastAudioErr || "source introuvable";
+      toast(navigator.onLine === false ? "Pas de connexion internet : l’audio a besoin du réseau." : "Le son n’a pas pu être chargé. Réessayez dans un instant.");
+      onState?.("error"); return;
+    }
+    const a = new Audio(); player = a; let done = false;
+    const fail = why => { if (done) return; done = true; lastAudioErr = why; if (player === a) tryNext(); };
+    a.preload = "auto"; a.src = urls[i++];
+    a.onerror = () => fail("erreur de chargement");
+    a.onplaying = () => { if (btn) btn.textContent = "Lecture…"; onState?.("playing"); };
+    a.onended = () => { reset(); onState?.("ended"); };
+    a.onpause = () => { if (player !== a || a.ended) return; reset(); };
+    if (btn) btn.textContent = "Chargement…";
+    const p = a.play();
+    if (p && p.catch) p.catch(e => {
+      if (e && e.name === "NotAllowedError") { done = true; reset(); toast("Le navigateur a bloqué le son : touchez à nouveau le bouton."); onState?.("blocked"); }
+      else fail(e && e.name || "lecture impossible");
+    });
+  };
+  tryNext();
 }
 function listenBtn(label, url) { return audioOK ? el("button", {class: "btn small", onclick: e => play(url, e.currentTarget)}, label) : null; }
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const IS_STANDALONE = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 async function initSpeech() {
   if (inViewer) { try { dict = await claude.use("dictation"); } catch { dict = null; } }
   micReady();
@@ -1248,13 +1293,22 @@ function listen({continuous, onPartial, onDone, onError}) {
     dict.start({language: "ar"}).catch(e => finish(e?.code === "not_granted" ? "Le micro a été refusé pour cette page." : e?.code === "unavailable" ? "La dictée en arabe n’est pas disponible ici." : e?.code === "dismissed" ? "Autorisation du micro fermée sans réponse. Réessayez." : "Impossible de démarrer le micro."));
     return {stop: () => { dict.stop().catch(() => finish(null)); }};
   }
-  const rec = new WebSR(); rec.lang = "ar-SA"; rec.interimResults = true; rec.maxAlternatives = 5; rec.continuous = !!continuous;
+  const rec = new WebSR(); rec.lang = "ar-SA"; rec.interimResults = true; rec.maxAlternatives = 5;
+  // Chrome Android répète les résultats en mode continu : on écoute phrase par phrase et on relance
+  rec.continuous = !!continuous && !IS_ANDROID;
   const fins = [], alts = []; let interim = "", err = null, userStop = false, restarts = 0;
+  const pushFinal = t => {
+    t = (t || "").trim(); if (!t) return;
+    const last = fins[fins.length - 1];
+    if (last && (t === last || t.startsWith(last))) fins[fins.length - 1] = t;
+    else if (last && last.endsWith(t)) return;
+    else fins.push(t);
+  };
   rec.onresult = e => {
     interim = "";
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const res = e.results[i];
-      if (res.isFinal) { fins.push(res[0].transcript); for (let k = 1; k < res.length; k++) alts.push(res[k].transcript); }
+      if (res.isFinal) { pushFinal(res[0].transcript); for (let k = 1; k < res.length; k++) alts.push(res[k].transcript); }
       else interim += res[0].transcript;
     }
     onPartial?.((fins.join(" ") + " " + interim).trim());
@@ -1262,12 +1316,13 @@ function listen({continuous, onPartial, onDone, onError}) {
   rec.onerror = e => { err = e.error; };
   rec.onend = () => {
     // Chrome coupe l’écoute à chaque pause : en récitation, on relance tant que l’utilisateur n’a pas arrêté.
-    if (continuous && !userStop && restarts < 12 && (!err || err === "no-speech")) {
-      if (interim) { fins.push(interim); interim = ""; }
+    if (continuous && !userStop && restarts < 30 && (!err || err === "no-speech")) {
+      if (interim) { pushFinal(interim); interim = ""; }
       restarts++; err = null;
       try { rec.start(); return; } catch {}
     }
     const text = (fins.join(" ") + " " + interim).trim();
+    lastMicErr = err || "";
     if (err && !["no-speech", "aborted"].includes(err) && !text)
       onError(err === "not-allowed" || err === "service-not-allowed" ? "Le micro a été refusé. Autorisez-le dans les réglages du navigateur." : err === "network" ? "La reconnaissance vocale demande une connexion internet." : err === "language-not-supported" ? "Ce navigateur ne reconnaît pas l’arabe." : "La reconnaissance vocale a échoué. Réessayez.");
     else onDone({text, alts});
@@ -1984,10 +2039,32 @@ $("#b-set").addEventListener("click", () => {
   $("#set-ai-form").hidden = inViewer;
   $("#set-ai-txt").textContent = inViewer ? "Sur claude.ai, Claude est déjà relié à votre compte : aucune clé n’est nécessaire." : "Collez votre clé API Anthropic (créée sur console.anthropic.com). Elle reste enregistrée uniquement dans ce navigateur, jamais dans le code de la page : vous pouvez héberger l’app publiquement sans l’exposer.";
   $("#set-key").value = settings.key || ""; $("#set-model").value = settings.model || "";
+  show($("#test-st"), ""); $("#test-live").textContent = "";
+  $("#test-sound").hidden = !audioOK;
+  $("#set-tips").textContent = IS_IOS
+    ? (IS_STANDALONE ? "Sur iPhone, la reconnaissance vocale fonctionne mieux dans Safari que dans l’app installée sur l’écran d’accueil : si le micro ne répond pas, ouvrez le site dans Safari. Elle demande aussi que Siri et la dictée soient activés (Réglages, puis Siri)." : "Sur iPhone, la reconnaissance vocale demande que Siri et la dictée soient activés (Réglages, puis Siri). Le son est coupé si le bouton silencieux est activé.")
+    : IS_ANDROID ? "Sur Android, utilisez Chrome à jour. Si l’arabe est mal reconnu, ouvrez les réglages Google, puis Voix, et ajoutez l’arabe aux langues de reconnaissance vocale." : "Utilisez Chrome, Edge ou Safari à jour, avec un micro autorisé pour ce site.";
   show($("#set-st1"), ""); show($("#set-st2"), ""); micReady();
   $("#dlg-set").showModal();
 });
 $("#set-close").addEventListener("click", () => $("#dlg-set").close());
+$("#test-sound").addEventListener("click", e => {
+  show($("#test-st"), "Chargement du son… vous devriez entendre « bismi ».");
+  play(wordAudio(1, 1, 1), e.currentTarget, st => {
+    if (st === "playing") show($("#test-st"), "Le son est en cours de lecture. Si vous n’entendez rien : montez le volume" + (IS_IOS ? " et désactivez le mode silencieux (bouton sur le côté de l’iPhone)." : " du média, pas seulement de la sonnerie."));
+    if (st === "error") show($("#test-st"), "Le son n’a pas pu être chargé (" + lastAudioErr + "). Vérifiez votre connexion internet, puis réessayez.", true);
+    if (st === "blocked") show($("#test-st"), "Le navigateur a bloqué la lecture. Touchez à nouveau « Tester le son ».", true);
+  });
+});
+$("#test-mic-slot").replaceWith(micButton("Tester le micro", {
+  onStart: () => { show($("#test-st"), "Dites « بسم الله » (bismillâh)…"); $("#test-live").textContent = ""; },
+  onPartial: t => { $("#test-live").textContent = t; },
+  onResult: r => {
+    if (r.error) { show($("#test-st"), r.error, true); return; }
+    if (!r.text) { show($("#test-st"), "Rien n’a été entendu" + (lastMicErr ? " (" + lastMicErr + ")" : "") + ". Parlez plus près du micro, puis réessayez.", true); return; }
+    const sc = sim("بِسْمِ ٱللَّهِ", r.text);
+    show($("#test-st"), `Entendu : « ${r.text} ». ` + (sc >= .7 ? "Le micro et la reconnaissance fonctionnent." : "La reconnaissance fonctionne mais a mal compris : parlez plus lentement, dans un endroit calme."));
+  }}));
 const saveSettings = () => { try { localStorage.setItem(SETK, JSON.stringify(settings)); } catch {} setupAI(); scheduleRefresh(); };
 $("#set-save").addEventListener("click", () => { settings.key = $("#set-key").value.trim(); settings.model = $("#set-model").value.trim(); saveSettings(); show($("#set-st1"), settings.key ? "Clé enregistrée dans ce navigateur." : "Aucune clé enregistrée."); });
 $("#set-del").addEventListener("click", () => { delete settings.key; $("#set-key").value = ""; saveSettings(); show($("#set-st1"), "Clé effacée de ce navigateur."); });
